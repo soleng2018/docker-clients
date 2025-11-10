@@ -1,0 +1,415 @@
+#!/bin/bash
+
+# Script to generate docker-compose.yml files from parameters.txt
+
+# Function to find USB device info from MAC address
+find_usb_device() {
+    local mac_address=$1
+    
+    if [ -z "$mac_address" ]; then
+        echo ""
+        return
+    fi
+    
+    # Normalize MAC address for comparison
+    local mac_lower=$(echo "$mac_address" | tr '[:upper:]' '[:lower:]')
+    
+    # Try to find the interface with this MAC
+    local interface=""
+    
+    # Method 1: Use ip link
+    interface=$(ip link show 2>/dev/null | grep -iB1 "$mac_lower" | head -1 | awk -F': ' '{print $2}' | awk '{print $1}')
+    
+    # Method 2: Use ifconfig if ip link didn't work
+    if [ -z "$interface" ]; then
+        interface=$(ifconfig 2>/dev/null | grep -iB1 "$mac_lower" | head -1 | awk '{print $1}' | tr -d ':')
+    fi
+    
+    # Method 3: Check /sys/class/net directly
+    if [ -z "$interface" ]; then
+        for iface in /sys/class/net/*; do
+            if [ -f "$iface/address" ]; then
+                local iface_mac=$(cat "$iface/address" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+                if [ "$iface_mac" = "$mac_lower" ]; then
+                    interface=$(basename "$iface")
+                    break
+                fi
+            fi
+        done
+    fi
+    
+    local device_path=""
+    local usb_match=""
+    
+    # If interface found, get USB device path from interface
+    if [ -n "$interface" ]; then
+        device_path=$(readlink -f "/sys/class/net/$interface/device" 2>/dev/null)
+        if [ -n "$device_path" ]; then
+            # Extract USB bus and device number from interface path
+            usb_match=$(echo "$device_path" | grep -oE 'usb[0-9]+/[0-9]+-[0-9.]+' | head -1)
+        fi
+    fi
+    
+    # Method 4: If not found via interface, check USB devices directly
+    # This handles cases where USB device is already passed to a container
+    if [ -z "$usb_match" ]; then
+        # Check all USB devices in /sys/bus/usb/devices
+        for usb_dev_link in /sys/bus/usb/devices/*; do
+            # Follow symlink to actual device path
+            local usb_dev=$(readlink -f "$usb_dev_link" 2>/dev/null)
+            if [ -z "$usb_dev" ] || [ ! -d "$usb_dev" ]; then
+                continue
+            fi
+            
+            # Check if this USB device has a network interface with matching MAC
+            # Look for net subdirectories in the device path
+            for net_dir in "$usb_dev"/*/net/* "$usb_dev"/*/*/net/*; do
+                if [ -d "$net_dir" ] && [ -f "$net_dir/address" ]; then
+                    local net_mac=$(cat "$net_dir/address" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+                    if [ "$net_mac" = "$mac_lower" ]; then
+                        # Found matching MAC, extract USB info from device path
+                        usb_match=$(echo "$usb_dev" | grep -oE 'usb[0-9]+/[0-9]+-[0-9.]+')
+                        if [ -n "$usb_match" ]; then
+                            break 2
+                        fi
+                    fi
+                fi
+            done
+        done
+    fi
+    
+    if [ -z "$usb_match" ]; then
+        echo ""
+        return
+    fi
+    
+    # Extract bus number (usb1 -> 1)
+    local bus=$(echo "$usb_match" | grep -oE 'usb[0-9]+' | grep -oE '[0-9]+')
+    
+    # Extract device path (1-1.2 -> need to find device number)
+    local device_path_part=$(echo "$usb_match" | cut -d'/' -f2)
+    
+    # The device number is typically the last number in the path
+    # For 1-1.2, we need to check /sys/bus/usb/devices/1-1.2/devnum
+    local devnum_file="/sys/bus/usb/devices/$device_path_part/devnum"
+    local device=""
+    
+    if [ -f "$devnum_file" ]; then
+        device=$(cat "$devnum_file" 2>/dev/null | xargs)
+    else
+        # Fallback: try to extract from path
+        device=$(echo "$device_path_part" | grep -oE '[0-9]+$')
+    fi
+    
+    if [ -n "$bus" ] && [ -n "$device" ]; then
+        echo "hostbus=$bus,hostaddr=$device"
+    else
+        echo ""
+    fi
+}
+
+# Function to check if traefik is installed
+check_traefik_installed() {
+    # Check if traefik container is running (primary check)
+    if docker ps --format '{{.Names}}' | grep -qi traefik; then
+        return 0
+    fi
+    
+    # Check if traefik container exists (even if stopped)
+    if docker ps -a --format '{{.Names}}' | grep -qi traefik; then
+        return 0
+    fi
+    
+    # Check if traefik binary exists (standalone installation)
+    if command -v traefik &> /dev/null; then
+        return 0
+    fi
+    
+    # Note: We don't check for images alone, as having an image doesn't mean traefik is installed/running
+    return 1
+}
+
+# Function to ensure traefik network exists
+ensure_traefik_network() {
+    if ! docker network inspect traefik &> /dev/null; then
+        echo "Creating traefik network..."
+        docker network create traefik
+    fi
+}
+
+# Function to generate docker-compose.yml content
+generate_docker_compose() {
+    local container_name=$1
+    local version=$2
+    local ram_size=$3
+    local cpu_cores=$4
+    local username=$5
+    local password=$6
+    local port1=$7
+    local port2=$8
+    local domain=$9
+    local mac1=${10}
+    local mac2=${11}
+    local traefik_installed=${12}
+    
+    # Find USB device info for MAC addresses
+    local usb1=$(find_usb_device "$mac1")
+    local usb2=$(find_usb_device "$mac2")
+    
+    # Build ARGUMENTS string
+    local arguments=""
+    local usb_device_line=""
+    
+    # If MAC addresses are provided, always include USB device support
+    if [ -n "$mac1" ]; then
+        if [ -n "$usb1" ]; then
+            arguments="-device usb-host,$usb1"
+            if [ -n "$mac2" ] && [ -n "$usb2" ]; then
+                arguments="$arguments -device usb-host,$usb2"
+            fi
+        else
+            # Auto-detection failed, add placeholder comment
+            if [ -n "$mac2" ]; then
+                arguments="-device usb-host,hostbus=X,hostaddr=Y -device usb-host,hostbus=X,hostaddr=Y # TODO: Configure USB devices for MAC $mac1 and $mac2. Use 'lsusb' and check /sys/bus/usb/devices to find hostbus and hostaddr"
+            else
+                arguments="-device usb-host,hostbus=X,hostaddr=Y # TODO: Configure USB device for MAC $mac1. Use 'lsusb' and check /sys/bus/usb/devices to find hostbus and hostaddr"
+            fi
+        fi
+        usb_device_line="      - /dev/bus/usb # This line is only needed when passing USB"
+    fi
+    
+    cat <<EOF
+services:
+  windows:
+    image: dockurr/windows
+    container_name: ${container_name}
+    environment:
+      VERSION: "${version}"
+      RAM_SIZE: "${ram_size}"
+      CPU_CORES: "${cpu_cores}"
+      USERNAME: "${username}"
+      PASSWORD: "${password}"
+      DHCP: "Y" # If using Static IP remove this line
+EOF
+
+    if [ -n "$arguments" ]; then
+        echo "      ARGUMENTS: \"${arguments}\" # Passing USB Wireless NIC. Remove this line if no WiFi. Use lsusb to get vendorid and productid"
+    fi
+    
+    cat <<EOF
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+      - /dev/vhost-net # Only needed if DHCP="Y". For static remove this line
+EOF
+
+    if [ -n "$usb_device_line" ]; then
+        echo "$usb_device_line"
+    fi
+    
+    cat <<EOF
+    device_cgroup_rules:
+      # Only needed if DHCP="Y". For static remove this line
+      - 'c *:* rwm' # Only needed if DHCP="Y". For static remove this line
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - ${port1}:8006
+      - ${port2}:3389/tcp
+      - ${port2}:3389/udp
+    volumes:
+      - ./windows:/storage
+      - ./data:/data
+    restart: always
+    stop_grace_period: 2m
+EOF
+
+    # Only include traefik labels if traefik is installed
+    if [ "$traefik_installed" = "true" ]; then
+        cat <<EOF
+    labels:
+      - traefik.enable=true
+      # Main web interface route (with Authentik)
+      - traefik.http.routers.${container_name}-web.rule=Host(\`${container_name}.${domain}\`) && !PathPrefix(\`/websockify\`)
+      - traefik.http.routers.${container_name}-web.entrypoints=websecure
+      - traefik.http.routers.${container_name}-web.tls=true
+      - traefik.http.routers.${container_name}-web.tls.certresolver=letsencrypt
+      - traefik.http.routers.${container_name}-web.service=${container_name}-svc
+      - traefik.http.routers.${container_name}-web.middlewares=authentik@file
+      # WebSocket route (without Authentik)
+      - traefik.http.routers.${container_name}-ws.rule=Host(\`${container_name}.${domain}\`) && PathPrefix(\`/websockify\`)
+      - traefik.http.routers.${container_name}-ws.entrypoints=websecure
+      - traefik.http.routers.${container_name}-ws.tls=true
+      - traefik.http.routers.${container_name}-ws.tls.certresolver=letsencrypt
+      - traefik.http.routers.${container_name}-ws.service=${container_name}-svc
+      - traefik.http.routers.${container_name}-ws.middlewares=${container_name}-ws-headers
+      # Service definition
+      - traefik.http.services.${container_name}-svc.loadBalancer.server.port=8006
+      - traefik.http.services.${container_name}-svc.loadBalancer.server.scheme=http
+      # WebSocket headers middleware
+      - traefik.http.middlewares.${container_name}-ws-headers.headers.customrequestheaders.Connection=upgrade
+      - traefik.http.middlewares.${container_name}-ws-headers.headers.customrequestheaders.Upgrade=websocket
+      - traefik.http.middlewares.${container_name}-ws-headers.headers.customrequestheaders.Sec-WebSocket-Version=13
+EOF
+    fi
+    
+    # Only include traefik network if traefik is installed
+    if [ "$traefik_installed" = "true" ]; then
+        cat <<EOF
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true
+EOF
+    fi
+    
+    echo ""
+}
+
+# Main script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PARAMETERS_FILE="$SCRIPT_DIR/parameters.txt"
+
+if [ ! -f "$PARAMETERS_FILE" ]; then
+    echo "Error: parameters.txt not found in $SCRIPT_DIR"
+    exit 1
+fi
+
+# Check if traefik is installed
+TRAEFIK_INSTALLED="false"
+if check_traefik_installed; then
+    TRAEFIK_INSTALLED="true"
+    echo "Traefik is installed. Including traefik labels and network."
+    # Ensure traefik network exists
+    ensure_traefik_network
+else
+    echo "Traefik is not installed. Skipping traefik labels and network."
+fi
+
+# First pass: Validate port uniqueness
+declare -A used_ports
+declare -A container_ports
+validation_errors=0
+
+echo "Validating port uniqueness..."
+
+while IFS= read -r line || [ -n "$line" ]; do
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    
+    # Parse line
+    if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
+        container_name=$(echo "${BASH_REMATCH[1]}" | xargs)
+        params=$(echo "${BASH_REMATCH[2]}" | xargs)
+        
+        # Parse parameters (remove quotes and split by comma)
+        IFS=',' read -ra PARAMS <<< "$params"
+        
+        # Extract port values (remove quotes)
+        # These are HOST ports - container ports are fixed at 8006 and 3389
+        host_port1=$(echo "${PARAMS[5]}" | tr -d '"' | xargs)
+        host_port2=$(echo "${PARAMS[6]}" | tr -d '"' | xargs)
+        
+        # Check host_port1 uniqueness (host ports must be unique)
+        if [[ -n "${used_ports[$host_port1]}" ]]; then
+            echo "ERROR: Host port $host_port1 is already used by container '${used_ports[$host_port1]}'. Container '$container_name' cannot use the same host port."
+            validation_errors=$((validation_errors + 1))
+        else
+            used_ports[$host_port1]="$container_name"
+        fi
+        
+        # Check host_port2 uniqueness (host ports must be unique)
+        if [[ -n "${used_ports[$host_port2]}" ]]; then
+            echo "ERROR: Host port $host_port2 is already used by container '${used_ports[$host_port2]}'. Container '$container_name' cannot use the same host port."
+            validation_errors=$((validation_errors + 1))
+        else
+            used_ports[$host_port2]="$container_name"
+        fi
+        
+        # Store ports for this container
+        container_ports[$container_name]="$host_port1:$host_port2"
+    fi
+done < "$PARAMETERS_FILE"
+
+# Exit if validation errors found
+if [ $validation_errors -gt 0 ]; then
+    echo ""
+    echo "Port validation failed with $validation_errors error(s). Please fix parameters.txt and try again."
+    exit 1
+fi
+
+echo "Port validation passed. All ports are unique."
+echo ""
+
+# Read parameters.txt line by line
+while IFS= read -r line || [ -n "$line" ]; do
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    
+    # Parse line: windows1 = "11","4G","2","nile","nile1234","8006","3389","nilenetworks.com","5c:85:7e:39:1e:f3","1c:69:7a:ac:2d:0e"
+    if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
+        container_name=$(echo "${BASH_REMATCH[1]}" | xargs)
+        params=$(echo "${BASH_REMATCH[2]}" | xargs)
+        
+        # Parse parameters (remove quotes and split by comma)
+        IFS=',' read -ra PARAMS <<< "$params"
+        
+        # Extract values (remove quotes)
+        version=$(echo "${PARAMS[0]}" | tr -d '"' | xargs)
+        ram_size=$(echo "${PARAMS[1]}" | tr -d '"' | xargs)
+        cpu_cores=$(echo "${PARAMS[2]}" | tr -d '"' | xargs)
+        username=$(echo "${PARAMS[3]}" | tr -d '"' | xargs)
+        password=$(echo "${PARAMS[4]}" | tr -d '"' | xargs)
+        port1=$(echo "${PARAMS[5]}" | tr -d '"' | xargs)
+        port2=$(echo "${PARAMS[6]}" | tr -d '"' | xargs)
+        domain=$(echo "${PARAMS[7]}" | tr -d '"' | xargs)
+        mac1=$(echo "${PARAMS[8]}" | tr -d '"' | xargs)
+        mac2=$(echo "${PARAMS[9]}" | tr -d '"' | xargs)
+        
+        # Check if USB devices are required and can be found
+        usb_devices_found=true
+        missing_macs=""
+        
+        if [ -n "$mac1" ]; then
+            usb1=$(find_usb_device "$mac1")
+            if [ -z "$usb1" ]; then
+                usb_devices_found=false
+                missing_macs="$mac1"
+            fi
+        fi
+        
+        if [ -n "$mac2" ]; then
+            usb2=$(find_usb_device "$mac2")
+            if [ -z "$usb2" ]; then
+                usb_devices_found=false
+                if [ -n "$missing_macs" ]; then
+                    missing_macs="$missing_macs, $mac2"
+                else
+                    missing_macs="$mac2"
+                fi
+            fi
+        fi
+        
+        # If USB devices are required but not found, skip folder creation
+        if [ "$usb_devices_found" = "false" ]; then
+            echo "WARNING: Skipping container '$container_name' - USB device(s) not found for MAC address(es): $missing_macs"
+            continue
+        fi
+        
+        # Create folder for container
+        container_dir="$SCRIPT_DIR/$container_name"
+        mkdir -p "$container_dir"
+        
+        # Generate docker-compose.yml
+        generate_docker_compose "$container_name" "$version" "$ram_size" "$cpu_cores" \
+            "$username" "$password" "$port1" "$port2" "$domain" "$mac1" "$mac2" "$TRAEFIK_INSTALLED" > \
+            "$container_dir/docker-compose.yml"
+        
+        echo "Generated docker-compose.yml for $container_name in $container_dir"
+    fi
+done < "$PARAMETERS_FILE"
+
+echo "Done! All docker-compose.yml files have been generated."
+
