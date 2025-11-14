@@ -199,7 +199,7 @@ EOF
     devices:
       - /dev/kvm
       - /dev/net/tun
-      - /dev/vhost-net # Only needed if DHCP="Y". For static remove this line
+      #- /dev/vhost-net # Only needed if DHCP="Y". For static remove this line
 EOF
 
     if [ -n "$usb_device_line" ]; then
@@ -209,7 +209,7 @@ EOF
     cat <<EOF
     device_cgroup_rules:
       # Only needed if DHCP="Y". For static remove this line
-      - 'c *:* rwm' # Only needed if DHCP="Y". For static remove this line
+      #- 'c *:* rwm' # Only needed if DHCP="Y". For static remove this line
     cap_add:
       - NET_ADMIN
     ports:
