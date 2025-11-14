@@ -39,20 +39,29 @@ find_usb_device() {
     fi
     
     local device_path=""
-    local usb_match=""
+    local usb_device_dir=""
     
     # If interface found, get USB device path from interface
     if [ -n "$interface" ]; then
         device_path=$(readlink -f "/sys/class/net/$interface/device" 2>/dev/null)
-        if [ -n "$device_path" ]; then
-            # Extract USB bus and device number from interface path
-            usb_match=$(echo "$device_path" | grep -oE 'usb[0-9]+/[0-9]+-[0-9.]+' | head -1)
+        if [ -n "$device_path" ] && [ -d "$device_path" ]; then
+            # Navigate up the directory tree to find USB device directory with busnum and devnum
+            local current_dir="$device_path"
+            while [ -n "$current_dir" ] && [ "$current_dir" != "/" ]; do
+                # Check if this directory has busnum and devnum files (indicates it's a USB device)
+                if [ -f "$current_dir/busnum" ] && [ -f "$current_dir/devnum" ]; then
+                    usb_device_dir="$current_dir"
+                    break
+                fi
+                # Move up one directory
+                current_dir=$(dirname "$current_dir")
+            done
         fi
     fi
     
     # Method 4: If not found via interface, check USB devices directly
     # This handles cases where USB device is already passed to a container
-    if [ -z "$usb_match" ]; then
+    if [ -z "$usb_device_dir" ]; then
         # Check all USB devices in /sys/bus/usb/devices
         for usb_dev_link in /sys/bus/usb/devices/*; do
             # Follow symlink to actual device path
@@ -67,39 +76,29 @@ find_usb_device() {
                 if [ -d "$net_dir" ] && [ -f "$net_dir/address" ]; then
                     local net_mac=$(cat "$net_dir/address" 2>/dev/null | tr '[:upper:]' '[:lower:]')
                     if [ "$net_mac" = "$mac_lower" ]; then
-                        # Found matching MAC, extract USB info from device path
-                        usb_match=$(echo "$usb_dev" | grep -oE 'usb[0-9]+/[0-9]+-[0-9.]+')
-                        if [ -n "$usb_match" ]; then
-                            break 2
-                        fi
+                        # Found matching MAC, navigate up to find USB device directory
+                        local current_dir="$net_dir"
+                        while [ -n "$current_dir" ] && [ "$current_dir" != "/" ]; do
+                            if [ -f "$current_dir/busnum" ] && [ -f "$current_dir/devnum" ]; then
+                                usb_device_dir="$current_dir"
+                                break 2
+                            fi
+                            current_dir=$(dirname "$current_dir")
+                        done
                     fi
                 fi
             done
         done
     fi
     
-    if [ -z "$usb_match" ]; then
+    if [ -z "$usb_device_dir" ] || [ ! -f "$usb_device_dir/busnum" ] || [ ! -f "$usb_device_dir/devnum" ]; then
         echo ""
         return
     fi
     
-    # Extract bus number (usb1 -> 1)
-    local bus=$(echo "$usb_match" | grep -oE 'usb[0-9]+' | grep -oE '[0-9]+')
-    
-    # Extract device path (1-1.2 -> need to find device number)
-    local device_path_part=$(echo "$usb_match" | cut -d'/' -f2)
-    
-    # The device number is typically the last number in the path
-    # For 1-1.2, we need to check /sys/bus/usb/devices/1-1.2/devnum
-    local devnum_file="/sys/bus/usb/devices/$device_path_part/devnum"
-    local device=""
-    
-    if [ -f "$devnum_file" ]; then
-        device=$(cat "$devnum_file" 2>/dev/null | xargs)
-    else
-        # Fallback: try to extract from path
-        device=$(echo "$device_path_part" | grep -oE '[0-9]+$')
-    fi
+    # Read bus and device numbers directly from USB device directory
+    local bus=$(cat "$usb_device_dir/busnum" 2>/dev/null | xargs)
+    local device=$(cat "$usb_device_dir/devnum" 2>/dev/null | xargs)
     
     if [ -n "$bus" ] && [ -n "$device" ]; then
         echo "hostbus=$bus,hostaddr=$device"
@@ -189,7 +188,7 @@ services:
       CPU_CORES: "${cpu_cores}"
       USERNAME: "${username}"
       PASSWORD: "${password}"
-      DHCP: "Y" # If using Static IP remove this line
+      #DHCP: "Y" # If using Static IP remove this line
 EOF
 
     if [ -n "$arguments" ]; then
