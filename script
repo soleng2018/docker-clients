@@ -295,6 +295,11 @@ EOF
 # Main script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARAMETERS_FILE="$SCRIPT_DIR/parameters.txt"
+# Each workshop is its own clone of this repo (e.g. /home/nova/nw3), so the
+# folder name itself is the workshop identifier -- used to prefix every
+# Docker container name / Traefik hostname (e.g. "win1" -> "nw3-win1")
+# without needing that prefix typed into parameters.txt too.
+WORKSHOP_NAME="$(basename "$SCRIPT_DIR")"
 
 if [ ! -f "$PARAMETERS_FILE" ]; then
     echo "Error: parameters.txt not found in $SCRIPT_DIR"
@@ -435,7 +440,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         # Docker container names/hostnames can't contain "/", so those use
         # a sanitized "-"-joined form instead (e.g. "nw3-win1").
         container_dir="$SCRIPT_DIR/$container_name"
-        docker_name=$(echo "$container_name" | tr '/' '-')
+        docker_name="${WORKSHOP_NAME}-$(echo "$container_name" | tr '/' '-')"
         mkdir -p "$container_dir"
 
         # Generate docker-compose.yml

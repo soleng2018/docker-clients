@@ -21,7 +21,12 @@ clone** of this repo, one directory per workshop, e.g.:
 
 Each clone has its own `parameters.txt` (its own VMs, MACs, ports) and its
 own generated `<vm-name>/docker-compose.yml` subfolders (e.g.
-`nw3/win1/docker-compose.yml`). To add the next workshop:
+`nw3/win1/docker-compose.yml`). The clone's folder name is also used to
+automatically prefix every actual Docker container name and Traefik
+hostname — a `win1` entry inside `/home/nova/nw3` becomes container
+`nw3-win1` / hostname `nw3-win1.<domain>`, with no need to type the workshop
+name into `parameters.txt` itself (so it can never drift out of sync with
+the folder it's actually in). To add the next workshop:
 
 ```bash
 git clone git@github.com:soleng2018/docker-clients.git /home/nova/nw4
@@ -75,8 +80,10 @@ of both `os` values. Notes:
   entirely (`#win1 = ...`) while a dongle is still being sorted out.
 - `container_name` may also contain `/` if you ever want to group VMs
   within a single clone (e.g. `foo/win1`); not needed for the one-clone-
-  per-workshop layout above, but supported since `mkdir -p` handles it and
-  `/` is replaced with `-` for the actual Docker container name/hostname.
+  per-workshop layout above, but supported since `mkdir -p` handles it.
+- The actual Docker container name / Traefik hostname is
+  `<workshop-folder-name>-<container_name>`, with any `/` in
+  `container_name` also replaced by `-` (both can't hold a literal `/`).
 
 ## Usage
 
