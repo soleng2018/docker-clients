@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# Reacts to a USB/IP attach-state change: regenerates every pod's
-# docker-compose.yml (via ../script) and reconciles it with `docker compose
-# up -d`. Compose only recreates a container whose config actually
-# changed, so this naturally limits the blast radius to whatever pod's
-# hostbus/hostaddr actually moved -- everything else is a no-op.
+# Shared regen worker, installed once system-wide regardless of how many
+# workshop clones exist (e.g. /home/nova/nw1, nw2, nw3, ...). Each clone's
+# install.sh registers its own directory here; this script reacts to a
+# single USB/IP attach-state change by regenerating + reconciling every
+# registered clone in turn.
+#
+# For each registered directory: run its own ./script (regenerates every
+# pod's docker-compose.yml; a pod is left untouched if any of its MACs
+# isn't currently resolvable), then `docker compose up -d` per pod
+# directory it produced. Compose only recreates a container whose config
+# actually differs, so this naturally limits the blast radius to whatever
+# pod's device mapping actually moved.
 #
 # Triggered by usbip-net-regen.path watching
-# /var/lib/usbip-net-client/attached.csv (written by usbip-net-toolkit's
-# client only when its attach state changes). Safe to also run by hand.
+# /var/lib/usbip-net-client/attached.csv. Safe to also run by hand.
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REGISTRY="/etc/usbip-net-regen/repos.txt"
 LOCK_FILE="/run/lock/usbip-net-regen.lock"
 
 exec 9>"$LOCK_FILE"
@@ -19,28 +25,39 @@ if ! flock -n 9; then
     exit 0
 fi
 
-cd "$REPO_DIR"
-
-if [ ! -f parameters.txt ]; then
-    echo "usbip-net-regen: no parameters.txt in $REPO_DIR, nothing to do"
+if [ ! -f "$REGISTRY" ]; then
+    echo "usbip-net-regen: no registry at $REGISTRY, nothing to do"
     exit 0
 fi
 
-echo "usbip-net-regen: regenerating docker-compose files"
-bash "$REPO_DIR/script"
+while IFS= read -r repo_dir || [ -n "$repo_dir" ]; do
+    [[ -z "$repo_dir" || "$repo_dir" =~ ^[[:space:]]*# ]] && continue
 
-while IFS= read -r line || [ -n "$line" ]; do
-    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-    if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
-        container_name=$(echo "${BASH_REMATCH[1]}" | xargs)
-        pod_dir="$REPO_DIR/$container_name"
-        if [ -f "$pod_dir/docker-compose.yml" ]; then
-            echo "usbip-net-regen: reconciling $container_name"
-            if ! (cd "$pod_dir" && docker compose up -d); then
-                echo "usbip-net-regen: WARNING failed to reconcile $container_name" >&2
+    if [ ! -d "$repo_dir" ]; then
+        echo "usbip-net-regen: WARNING registered folder '$repo_dir' no longer exists, skipping" >&2
+        continue
+    fi
+    if [ ! -f "$repo_dir/parameters.txt" ] || [ ! -f "$repo_dir/script" ]; then
+        echo "usbip-net-regen: WARNING '$repo_dir' has no parameters.txt/script, skipping" >&2
+        continue
+    fi
+
+    echo "usbip-net-regen: regenerating $repo_dir"
+    (cd "$repo_dir" && bash script)
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
+            container_name=$(echo "${BASH_REMATCH[1]}" | xargs)
+            pod_dir="$repo_dir/$container_name"
+            if [ -f "$pod_dir/docker-compose.yml" ]; then
+                echo "usbip-net-regen: reconciling $repo_dir/$container_name"
+                if ! (cd "$pod_dir" && docker compose up -d); then
+                    echo "usbip-net-regen: WARNING failed to reconcile $pod_dir" >&2
+                fi
             fi
         fi
-    fi
-done < parameters.txt
+    done < "$repo_dir/parameters.txt"
+done < "$REGISTRY"
 
 echo "usbip-net-regen: done"

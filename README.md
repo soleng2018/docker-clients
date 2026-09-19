@@ -1,4 +1,4 @@
-# prod-client
+# docker-clients
 
 Generates a `docker-compose.yml` per lab VM (Windows or macOS, via
 [dockurr/windows](https://github.com/dockur/windows) /
@@ -6,6 +6,30 @@ Generates a `docker-compose.yml` per lab VM (Windows or macOS, via
 through by MAC address, and keeps them working when those devices arrive
 over [usbip-net-toolkit](https://github.com/soleng2018/usbip-net-toolkit)
 instead of a physical cable.
+
+## One clone per workshop
+
+Each hands-on-lab pod (RF chamber + Pi + wired dongle) gets its **own
+clone** of this repo, one directory per workshop, e.g.:
+
+```
+/home/nova/nw1
+/home/nova/nw2
+/home/nova/nw3
+/home/nova/nw4
+```
+
+Each clone has its own `parameters.txt` (its own VMs, MACs, ports) and its
+own generated `<vm-name>/docker-compose.yml` subfolders (e.g.
+`nw3/win1/docker-compose.yml`). To add the next workshop:
+
+```bash
+git clone git@github.com:soleng2018/docker-clients.git /home/nova/nw4
+cd /home/nova/nw4
+cp parameters.txt.example parameters.txt   # then fill in nw4's real values
+bash script
+sudo bash install.sh
+```
 
 ## How it works
 
@@ -47,18 +71,18 @@ of both `os` values. Notes:
 - A pod whose MAC(s) aren't currently resolvable locally is skipped
   (warning printed, nothing written) rather than generating a broken
   compose file — this is what makes it safe to run `script` speculatively,
-  e.g. before a Pi/adapter has come online yet.
-- `container_name` may contain `/` to group VMs under a workshop folder,
-  e.g. `nw3/win1` writes to `nw3/win1/docker-compose.yml`. The actual
-  Docker container name / Traefik hostname is the same string with `/`
-  replaced by `-` (e.g. `nw3-win1`), since those can't contain a literal
-  `/`.
+  e.g. before a Pi/adapter has come online yet, or to comment a line out
+  entirely (`#win1 = ...`) while a dongle is still being sorted out.
+- `container_name` may also contain `/` if you ever want to group VMs
+  within a single clone (e.g. `foo/win1`); not needed for the one-clone-
+  per-workshop layout above, but supported since `mkdir -p` handles it and
+  `/` is replaced with `-` for the actual Docker container name/hostname.
 
 ## Usage
 
 ```bash
-bash script                          # (re)generate docker-compose.yml for every resolvable VM
-cd <container_name-or-workshop/vm> && docker compose up -d
+bash script                 # (re)generate docker-compose.yml for every resolvable VM in this clone
+cd <vm-name> && docker compose up -d
 ```
 
 ## Keeping USB/IP-sourced devices in sync (`usbip-net-regen`)
@@ -67,23 +91,28 @@ If any of your MACs arrive via `usbip-net-toolkit`, a device's `hostaddr`
 can change whenever it's re-attached (Pi reboot, network blip, this host
 rebooting) — silently breaking a running container's passthrough until
 `script` is rerun and the container recreated. `install.sh` sets up a
-systemd path unit that does that automatically:
+**shared** systemd path unit (one per machine, not one per clone) that
+does that automatically for every registered workshop folder:
 
 ```bash
 sudo bash install.sh
 ```
 
-This watches `usbip-net-toolkit`'s
-`/var/lib/usbip-net-client/attached.csv` (only present once its `client/`
-is installed) and, on every change, reruns `script` then `docker compose
-up -d` in every pod directory — compose only recreates a container whose
-config actually differs, so this only touches whatever pod's device
-mapping actually moved.
+Since one USB/IP client on this machine can feed multiple workshop clones
+(e.g. nw1–nw4, each with their own Pi), the watcher itself is shared:
+running `install.sh` from any clone installs/refreshes it and adds that
+clone's directory to `/etc/usbip-net-regen/repos.txt`. Whenever
+`usbip-net-toolkit`'s `/var/lib/usbip-net-client/attached.csv` changes, it
+reruns `script` then `docker compose up -d` for every registered clone —
+compose only recreates a container whose config actually differs, so this
+only touches whatever pod's device mapping actually moved, in whichever
+clone it belongs to.
 
 ```bash
-sudo bash cleanup.sh                          # remove the regen bridge only
-sudo bash cleanup.sh --wipe-pods              # + docker compose down every generated pod
-sudo bash cleanup.sh --wipe-pods --wipe-data  # + delete VM storage/data too (destructive)
+sudo bash cleanup.sh                            # unregister this clone only
+sudo bash cleanup.sh --wipe-pods                # + docker compose down every generated pod here
+sudo bash cleanup.sh --wipe-pods --wipe-data    # + delete VM storage/data too (destructive)
+sudo bash cleanup.sh --purge-shared             # + remove the shared bridge (refuses if other clones still registered)
 ```
 
 ## Rebuilding this box from scratch
@@ -98,5 +127,6 @@ full sequence is:
    Pi in `/etc/usbip-net/servers.conf`.
 4. `soleng2018/hol`'s `setup.sh` (FRR/DHCP/RADIUS containers).
 5. `soleng2018/labs`'s `labs.sh` (Traefik/Authentik/Cloudflared).
-6. Clone this repo, restore your real `parameters.txt` (kept outside git —
-   see above), then `bash script` and `sudo bash install.sh`.
+6. For each workshop (nw1, nw2, ...): clone this repo into its own
+   directory, restore that workshop's real `parameters.txt` (kept outside
+   git — see above), then `bash script` and `sudo bash install.sh`.

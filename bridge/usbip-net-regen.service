@@ -1,10 +1,9 @@
 [Unit]
-Description=Regenerate prod-client docker-compose files and reconcile containers after a USB/IP attach change
+Description=Regenerate every registered workshop folder and reconcile containers after a USB/IP attach change
 After=usbip-net-attach.service
 
 [Service]
 Type=oneshot
 User=__REGEN_USER__
 Group=__REGEN_GROUP__
-WorkingDirectory=__REPO_DIR__
-ExecStart=__REPO_DIR__/bridge/usbip-net-regen.sh
+ExecStart=/usr/local/sbin/usbip-net-regen.sh

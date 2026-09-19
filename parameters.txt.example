@@ -17,12 +17,14 @@
 #              (see usbip-net-toolkit) both work identically here; nothing
 #              in this script cares which one it is.
 #
-# container_name may contain "/" to group VMs under a workshop folder, e.g.
-# "nw3/win1" writes to nw3/win1/docker-compose.yml. The actual Docker
-# container name / Traefik hostname is the same string with "/" replaced by
-# "-" (e.g. "nw3-win1"), since those can't contain a literal "/".
+# Each workshop gets its own clone of this repo (e.g. /home/nova/nw1,
+# /home/nova/nw2, ...), so container_name here only needs to be unique
+# within THIS clone -- no workshop prefix needed. (container_name may still
+# contain "/" to group VMs within a single clone if you ever want that;
+# mkdir -p handles it and "/" becomes "-" in the actual Docker container
+# name/hostname, since those can't hold a literal "/".)
 #
 # All host ports (web_port and remote_port, across every line) must be unique.
 
-nw1/win1 = "windows","11","8G","4","nile","nile1234","8101","3391","nile.global","e8:4e:06:b0:3c:df"
-nw1/mac1 = "macos","14","8G","4","","","8102","3392","nile.global","c8:a3:62:ed:46:25"
+win1 = "windows","11","8G","4","nile","nile1234","8101","3391","nile.global","e8:4e:06:b0:3c:df"
+mac1 = "macos","14","8G","4","","","8102","3392","nile.global","c8:a3:62:ed:46:25"
