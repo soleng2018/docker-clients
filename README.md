@@ -48,12 +48,17 @@ of both `os` values. Notes:
   (warning printed, nothing written) rather than generating a broken
   compose file — this is what makes it safe to run `script` speculatively,
   e.g. before a Pi/adapter has come online yet.
+- `container_name` may contain `/` to group VMs under a workshop folder,
+  e.g. `nw3/win1` writes to `nw3/win1/docker-compose.yml`. The actual
+  Docker container name / Traefik hostname is the same string with `/`
+  replaced by `-` (e.g. `nw3-win1`), since those can't contain a literal
+  `/`.
 
 ## Usage
 
 ```bash
-bash script                 # (re)generate docker-compose.yml for every resolvable VM
-cd <container_name> && docker compose up -d
+bash script                          # (re)generate docker-compose.yml for every resolvable VM
+cd <container_name-or-workshop/vm> && docker compose up -d
 ```
 
 ## Keeping USB/IP-sourced devices in sync (`usbip-net-regen`)
