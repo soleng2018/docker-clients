@@ -14,15 +14,37 @@
 #
 # Triggered by usbip-net-regen.path watching
 # /var/lib/usbip-net-client/attached.csv. Safe to also run by hand.
+#
+# NOTE: usbip-net-attach.sh (usbip-net-toolkit's client) rewrites that CSV
+# unconditionally on every ~30s reconciliation cycle, whether or not
+# anything actually changed -- confirmed by reading its source (`} >
+# "$DOC_CSV"` with no change-check). So PathModified= alone fires every
+# cycle, not just on real attach changes. Gate on a content hash here
+# instead, so a no-op cycle exits immediately without regenerating/
+# reconciling anything.
 set -euo pipefail
 
 REGISTRY="/etc/usbip-net-regen/repos.txt"
 LOCK_FILE="/run/lock/usbip-net-regen.lock"
+STATE_DIR="/var/lib/usbip-net-regen"
+LAST_HASH_FILE="$STATE_DIR/last-attached-hash"
+ATTACHED_CSV="/var/lib/usbip-net-client/attached.csv"
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     echo "usbip-net-regen: another run is already in progress, skipping"
     exit 0
+fi
+
+mkdir -p "$STATE_DIR"
+if [ -f "$ATTACHED_CSV" ]; then
+    current_hash=$(sha256sum "$ATTACHED_CSV" | awk '{print $1}')
+    last_hash=$(cat "$LAST_HASH_FILE" 2>/dev/null || true)
+    if [ "$current_hash" = "$last_hash" ]; then
+        echo "usbip-net-regen: attach state unchanged, nothing to do"
+        exit 0
+    fi
+    echo "$current_hash" > "$LAST_HASH_FILE"
 fi
 
 if [ ! -f "$REGISTRY" ]; then
