@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch usbip-net-client attach state for prod-client regeneration
+
+[Path]
+PathModified=/var/lib/usbip-net-client/attached.csv
+Unit=usbip-net-regen.service
+
+[Install]
+WantedBy=multi-user.target

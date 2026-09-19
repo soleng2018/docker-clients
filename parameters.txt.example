@@ -1,0 +1,22 @@
+# One line per VM. Format:
+#   container_name = "os","version","ram","cpu","username","password","web_port","remote_port","domain","mac1"[,"mac2"...]
+#
+# os:          "windows" or "macos"
+# version:     passed through as-is to the image (e.g. "11" for Windows, "14" for macOS Sonoma)
+# ram / cpu:   passed through as RAM_SIZE / CPU_CORES (e.g. "8G", "4")
+# username/password: only used when os=windows; pass "","" for macos (that image doesn't support them)
+# web_port:    host port mapped to the container's web viewer (8006)
+# remote_port: host port mapped to the container's remote-access port
+#              (container-side is fixed per os: 3389/RDP for windows, 5900/VNC for macos)
+# domain:      used to build this VM's Traefik hostname (<container_name>.<domain>)
+# mac1[,mac2,...]: MAC address(es) of the USB NIC(s) to pass through to this VM.
+#              Resolved by whatever's visible locally under /sys/class/net at
+#              generation time -- a wired dongle plugged directly into this
+#              host and a wireless dongle imported over USB/IP from a Pi
+#              (see usbip-net-toolkit) both work identically here; nothing
+#              in this script cares which one it is.
+#
+# All host ports (web_port and remote_port, across every line) must be unique.
+
+ws1-win1 = "windows","11","8G","4","nile","nile1234","8101","3391","nile.global","e8:4e:06:b0:3c:df"
+ws1-mac1 = "macos","14","8G","4","","","8102","3392","nile.global","c8:a3:62:ed:46:25"

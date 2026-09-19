@@ -139,18 +139,27 @@ ensure_traefik_network() {
 # Function to generate docker-compose.yml content
 generate_docker_compose() {
     local container_name=$1
-    local version=$2
-    local ram_size=$3
-    local cpu_cores=$4
-    local username=$5
-    local password=$6
-    local port1=$7
-    local port2=$8
-    local domain=$9
-    local mac1=${10}
-    local mac2=${11}
-    local traefik_installed=${12}
-    
+    local os_type=$2
+    local version=$3
+    local ram_size=$4
+    local cpu_cores=$5
+    local username=$6
+    local password=$7
+    local port1=$8
+    local port2=$9
+    local domain=${10}
+    local mac1=${11}
+    local mac2=${12}
+    local traefik_installed=${13}
+
+    # dockurr/windows vs dockurr/macos: image name matches os_type directly.
+    # Only these differ between the two images: USERNAME/PASSWORD support,
+    # the remote-access port (RDP vs VNC), and the ./data bind mount.
+    local remote_port="3389"
+    if [ "$os_type" = "macos" ]; then
+        remote_port="5900"
+    fi
+
     # Find USB device info for MAC addresses
     local usb1=$(find_usb_device "$mac1")
     local usb2=$(find_usb_device "$mac2")
@@ -179,15 +188,23 @@ generate_docker_compose() {
     
     cat <<EOF
 services:
-  windows:
-    image: dockurr/windows
+  ${os_type}:
+    image: dockurr/${os_type}
     container_name: ${container_name}
     environment:
       VERSION: "${version}"
       RAM_SIZE: "${ram_size}"
       CPU_CORES: "${cpu_cores}"
+EOF
+
+    if [ "$os_type" = "windows" ]; then
+        cat <<EOF
       USERNAME: "${username}"
       PASSWORD: "${password}"
+EOF
+    fi
+
+    cat <<EOF
       #DHCP: "Y" # If using Static IP remove this line
 EOF
 
@@ -214,11 +231,19 @@ EOF
       - NET_ADMIN
     ports:
       - ${port1}:8006
-      - ${port2}:3389/tcp
-      - ${port2}:3389/udp
+      - ${port2}:${remote_port}/tcp
+      - ${port2}:${remote_port}/udp
     volumes:
-      - ./windows:/storage
+      - ./${os_type}:/storage
+EOF
+
+    if [ "$os_type" = "windows" ]; then
+        cat <<EOF
       - ./data:/data
+EOF
+    fi
+
+    cat <<EOF
     restart: always
     stop_grace_period: 2m
 EOF
@@ -307,9 +332,10 @@ while IFS= read -r line || [ -n "$line" ]; do
         IFS=',' read -ra PARAMS <<< "$params"
         
         # Extract port values (remove quotes)
-        # These are HOST ports - container ports are fixed at 8006 and 3389
-        host_port1=$(echo "${PARAMS[5]}" | tr -d '"' | xargs)
-        host_port2=$(echo "${PARAMS[6]}" | tr -d '"' | xargs)
+        # These are HOST ports - container port for port1 is always 8006;
+        # port2's container-side port depends on os (3389 RDP / 5900 VNC)
+        host_port1=$(echo "${PARAMS[6]}" | tr -d '"' | xargs)
+        host_port2=$(echo "${PARAMS[7]}" | tr -d '"' | xargs)
         
         # Check host_port1 uniqueness (host ports must be unique)
         if [[ -n "${used_ports[$host_port1]}" ]]; then
@@ -347,25 +373,31 @@ while IFS= read -r line || [ -n "$line" ]; do
     # Skip empty lines and comments
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
     
-    # Parse line: windows1 = "11","4G","2","nile","nile1234","8006","3389","nilenetworks.com","5c:85:7e:39:1e:f3","1c:69:7a:ac:2d:0e"
+    # Parse line: windows1 = "windows","11","4G","2","nile","nile1234","8006","3389","nilenetworks.com","5c:85:7e:39:1e:f3","1c:69:7a:ac:2d:0e"
     if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
         container_name=$(echo "${BASH_REMATCH[1]}" | xargs)
         params=$(echo "${BASH_REMATCH[2]}" | xargs)
-        
+
         # Parse parameters (remove quotes and split by comma)
         IFS=',' read -ra PARAMS <<< "$params"
-        
+
         # Extract values (remove quotes)
-        version=$(echo "${PARAMS[0]}" | tr -d '"' | xargs)
-        ram_size=$(echo "${PARAMS[1]}" | tr -d '"' | xargs)
-        cpu_cores=$(echo "${PARAMS[2]}" | tr -d '"' | xargs)
-        username=$(echo "${PARAMS[3]}" | tr -d '"' | xargs)
-        password=$(echo "${PARAMS[4]}" | tr -d '"' | xargs)
-        port1=$(echo "${PARAMS[5]}" | tr -d '"' | xargs)
-        port2=$(echo "${PARAMS[6]}" | tr -d '"' | xargs)
-        domain=$(echo "${PARAMS[7]}" | tr -d '"' | xargs)
-        mac1=$(echo "${PARAMS[8]}" | tr -d '"' | xargs)
-        mac2=$(echo "${PARAMS[9]}" | tr -d '"' | xargs)
+        os_type=$(echo "${PARAMS[0]}" | tr -d '"' | xargs)
+        version=$(echo "${PARAMS[1]}" | tr -d '"' | xargs)
+        ram_size=$(echo "${PARAMS[2]}" | tr -d '"' | xargs)
+        cpu_cores=$(echo "${PARAMS[3]}" | tr -d '"' | xargs)
+        username=$(echo "${PARAMS[4]}" | tr -d '"' | xargs)
+        password=$(echo "${PARAMS[5]}" | tr -d '"' | xargs)
+        port1=$(echo "${PARAMS[6]}" | tr -d '"' | xargs)
+        port2=$(echo "${PARAMS[7]}" | tr -d '"' | xargs)
+        domain=$(echo "${PARAMS[8]}" | tr -d '"' | xargs)
+        mac1=$(echo "${PARAMS[9]}" | tr -d '"' | xargs)
+        mac2=$(echo "${PARAMS[10]}" | tr -d '"' | xargs)
+
+        if [ "$os_type" != "windows" ] && [ "$os_type" != "macos" ]; then
+            echo "ERROR: Container '$container_name' has unrecognized os '$os_type' (expected 'windows' or 'macos'). Skipping."
+            continue
+        fi
         
         # Check if USB devices are required and can be found
         usb_devices_found=true
@@ -402,7 +434,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         mkdir -p "$container_dir"
         
         # Generate docker-compose.yml
-        generate_docker_compose "$container_name" "$version" "$ram_size" "$cpu_cores" \
+        generate_docker_compose "$container_name" "$os_type" "$version" "$ram_size" "$cpu_cores" \
             "$username" "$password" "$port1" "$port2" "$domain" "$mac1" "$mac2" "$TRAEFIK_INSTALLED" > \
             "$container_dir/docker-compose.yml"
         
