@@ -46,6 +46,12 @@ sed -e "s#__REGEN_USER__#$REGEN_USER#g" \
     "$REPO_DIR/bridge/usbip-net-regen.service" > /usr/lib/systemd/system/usbip-net-regen.service
 install -m 0644 "$REPO_DIR/bridge/usbip-net-regen.path" /usr/lib/systemd/system/usbip-net-regen.path
 
+echo "==> Creating shared state directory"
+# Created here (as root) rather than left to the service itself: the
+# service runs as $REGEN_USER (not root), which can't create a new
+# directory under /var/lib.
+install -d -m 0755 -o "$REGEN_USER" -g "$REGEN_GROUP" /var/lib/usbip-net-regen
+
 echo "==> Registering this workshop folder ($REPO_DIR)"
 mkdir -p "$REGISTRY_DIR"
 touch "$REGISTRY"
