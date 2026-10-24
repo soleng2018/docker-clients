@@ -3,167 +3,108 @@
 Generates a `docker-compose.yml` per lab VM (Windows or macOS, via
 [dockurr/windows](https://github.com/dockur/windows) /
 [dockurr/macos](https://github.com/dockur/macos)) with USB devices passed
-through by MAC address, and keeps them working when those devices arrive
-over [usbip-net-toolkit](https://github.com/soleng2018/usbip-net-toolkit)
-instead of a physical cable.
+through by MAC address, and keeps them working across a host reboot (which
+reassigns every USB device's bus address).
 
-## One clone per workshop
+## One clone, many testbeds
 
-Each hands-on-lab pod (RF chamber + Pi + wired dongle) gets its **own
-clone** of this repo, one directory per workshop, e.g.:
+Unlike the old layout, there is **one clone** of this repo (e.g.
+`/home/nova/docker-clients`), with a single `parameters.txt` describing
+every testbed. Running `reconcile.sh` creates one folder per testbed as a
+**sibling** of the clone -- one directory up -- each holding one subfolder
+per VM:
 
 ```
-/home/nova/nw1
-/home/nova/nw2
-/home/nova/nw3
-/home/nova/nw4
+/home/nova/docker-clients/     <- this clone: reconcile.sh, parameters.txt (real data, gitignored)
+/home/nova/nw3/win1/           <- generated: docker-compose.yml + VM storage
+/home/nova/nw3/win2/
+/home/nova/nw3/mac1/
+/home/nova/nw4/win1/
+/home/nova/nw4/win2/
+/home/nova/nw4/mac1/
 ```
 
-Each clone has its own `parameters.txt` (its own VMs, MACs, ports) and its
-own generated `<vm-name>/docker-compose.yml` subfolders (e.g.
-`nw3/win1/docker-compose.yml`). The clone's folder name is also used to
-automatically prefix every actual Docker container name and Traefik
-hostname — a `win1` entry inside `/home/nova/nw3` becomes container
-`nw3-win1` / hostname `nw3-win1.<domain>`, with no need to type the workshop
-name into `parameters.txt` itself (so it can never drift out of sync with
-the folder it's actually in). To add the next workshop:
-
-```bash
-git clone git@github.com:soleng2018/docker-clients.git /home/nova/nw4
-cd /home/nova/nw4
-cp parameters.txt.example parameters.txt   # then fill in nw4's real values
-bash script
-sudo bash install.sh
-```
-
-## How it works
-
-`script` reads `parameters.txt`, and for each line resolves the listed
-MAC address(es) to whatever's currently visible locally under
-`/sys/class/net`/`/sys/bus/usb/devices`, then writes a `docker-compose.yml`
-into a folder named after that line's container name, with QEMU
-USB-passthrough args (`-device usb-host,hostbus=X,hostaddr=Y`).
-
-**A MAC's origin is invisible to this script.** Whether a NIC is a
-USB-Ethernet dongle plugged directly into this host, or a USB WiFi dongle
-that physically lives on a Raspberry Pi across the network and arrives here
-via `usbip-net-toolkit`'s `client/` (`vhci_hcd` makes an imported device
-look exactly like a locally plugged-in one), `find_usb_device()` resolves
-it the same way. A VM can list any number of MACs from any mix of sources.
+A testbed is just a name prefix on the VM's key in `parameters.txt` --
+`nw3/win1` becomes container `nw3-win1` / folder `../nw3/win1`. There's no
+separate place to declare a testbed; adding one is just adding its first VM
+line.
 
 ## `parameters.txt`
 
 ```
-container_name = "os","version","ram","cpu","username","password","web_port","remote_port","domain","mac1"[,"mac2"][,"host=<fqdn>"][,"ip=<address>"]
+<testbed>/<vm> = "os","version","ram","cpu","username","password","web_port","remote_port","url","mac1"[,"mac2"][,"ip=<address>"]
 ```
 
-See [parameters.txt.example](parameters.txt.example) for a worked example
-of both `os` values. Notes:
+See [parameters.txt.example](parameters.txt.example) for the full field
+reference and a worked example. Notes:
 
-- `os` is `windows` or `macos`. Everything else about the two images is
-  identical (RAM_SIZE/CPU_CORES/VERSION, `/dev/kvm`, USB passthrough,
-  Traefik routing) except: `macos` doesn't take `username`/`password`
-  (pass `"",""`), its remote-access port is VNC/5900 instead of RDP/3389,
-  and it doesn't get the `./data` volume mount.
-- `parameters.txt` itself is git-ignored (see `.gitignore`) — it holds real
-  MACs, domain, and credentials for this specific deployment. Only
+- `parameters.txt` itself is git-ignored (see `.gitignore`) -- it holds real
+  MACs, hostnames, and credentials for this specific deployment. Only
   `parameters.txt.example` is committed. **Keep your real `parameters.txt`
-  backed up somewhere outside this repo** — cloning this repo fresh does
+  backed up somewhere outside this repo** -- cloning this repo fresh does
   not recover it.
-- All host ports (`web_port` and `remote_port`, across every line) must be
-  unique; `script` validates this up front and refuses to generate anything
-  if it finds a collision.
-- A pod whose MAC(s) aren't currently resolvable locally is skipped
-  (warning printed, nothing written) rather than generating a broken
-  compose file — this is what makes it safe to run `script` speculatively,
-  e.g. before a Pi/adapter has come online yet, or to comment a line out
-  entirely (`#win1 = ...`) while a dongle is still being sorted out.
-- `container_name` may also contain `/` if you ever want to group VMs
-  within a single clone (e.g. `foo/win1`); not needed for the one-clone-
-  per-workshop layout above, but supported since `mkdir -p` handles it.
-- The actual Docker container name / Traefik hostname is
-  `<workshop-folder-name>-<container_name>`, with any `/` in
-  `container_name` also replaced by `-` (both can't hold a literal `/`).
-
-- **Optional per-VM options**, after `domain`, in any order alongside the MACs:
-  `host=<fqdn>` sets the full Traefik hostname (default
-  `<docker-name>.<domain>`), and `ip=<address>` gives the VM a static
-  address on the Traefik network so anything that points at its IP
-  (Cloudflare Targets/routes, for example) survives a rebuild. Duplicate or
-  malformed `ip=` values are rejected up front, like port collisions.
-- **Optional global settings** — `UPPER_CASE = "value"` lines (VM names are
-  lower-case): `TRAEFIK_NETWORK` (default `traefik`), `TRAEFIK_SUBNET`
-  (pinned when the network is first created; warns if an existing network
-  differs), `CERT_RESOLVER`, `AUTH_MIDDLEWARE`, `ENTRYPOINT`, and
-  `REQUIRE_TRAEFIK = "true"` to refuse to generate (instead of silently
-  leaving the web routes out) when Traefik isn't running.
-- Every generated compose file starts with `name: <workshop>-<vm>`. Compose
-  would otherwise name the project after the folder (`win1`, in *every*
-  workshop), and one workshop's `docker compose up -d` would replace
-  another workshop's same-named VM.
+- `url` is the VM's complete Traefik hostname (e.g. `nw3-win1.example.com`)
+  and must be unique across every testbed in the file.
+- All host ports (`web_port`/`remote_port`, across every testbed) must be
+  unique.
+- `reconcile.sh` validates the whole file up front -- bad os value, missing
+  testbed prefix, duplicate key, non-numeric/duplicate port, invalid/
+  duplicate url, malformed MAC, invalid/duplicate `ip=` -- and refuses to
+  generate or change anything until every error is fixed.
+- A VM whose MAC(s) aren't currently resolvable locally is skipped (warning
+  printed, its existing folder left as-is) rather than generating a broken
+  compose file -- this is what makes it safe to add a line speculatively,
+  e.g. before a dongle has been plugged in yet.
 
 ## Usage
 
 ```bash
-bash up.sh                  # generate + start every VM in this clone, then report which are really running
-bash up.sh --dry-run        # same, but start nothing
-bash script                 # just (re)generate the docker-compose.yml files
+bash reconcile.sh              # generate + start every VM, prune anything removed, report
+bash reconcile.sh --dry-run    # same, but change nothing on disk or in docker
 ```
 
-`up.sh` exits non-zero and names any VM that isn't running — including ones
-skipped because their USB dongle wasn't found, which would otherwise be easy
-to miss.
+`reconcile.sh` is the only script you run day to day. It:
 
-## Keeping USB/IP-sourced devices in sync (`usbip-net-regen`)
+1. Validates `parameters.txt` (see above) -- aborts with no changes if it
+   finds an error.
+2. Generates/updates `../<testbed>/<vm>/docker-compose.yml` for every VM,
+   resolving each MAC to whatever bus/address it currently has.
+3. Runs `docker compose up -d` per VM -- compose only recreates a container
+   whose config actually changed, so re-running after a reboot only touches
+   the VMs whose USB mapping actually moved.
+4. Tears down and **moves** (not deletes) any VM's folder that this tool
+   previously generated but that no longer has a line in `parameters.txt`,
+   into `.trash/<testbed>-<vm>-<timestamp>/` inside this clone. Restore by
+   moving it back to `../<testbed>/<vm>` and re-adding its line.
 
-If any of your MACs arrive via `usbip-net-toolkit`, a device's `hostaddr`
-can change whenever it's re-attached (Pi reboot, network blip, this host
-rebooting) — silently breaking a running container's passthrough until
-`script` is rerun and the container recreated. `install.sh` sets up a
-**shared** systemd path unit (one per machine, not one per clone) that
-does that automatically for every registered workshop folder:
+## Keeping USB bus addresses fixed across a reboot
+
+Linux reassigns every USB device's bus address (`hostaddr`) on every reboot
+-- the bus number alone is not enough to find a device again. `install.sh`
+sets up a systemd service that runs `reconcile.sh` once at boot (after
+Docker and the network are up), so every VM's stale `-device
+usb-host,hostbus=...,hostaddr=...` gets corrected and recreated
+automatically instead of leaving the container stuck in a restart loop:
 
 ```bash
-sudo bash install.sh
+sudo bash install.sh      # install + enable the boot service
+sudo bash cleanup.sh      # uninstall it (see --wipe-pods / --wipe-data for teardown options)
 ```
 
-Since one USB/IP client on this machine can feed multiple workshop clones
-(e.g. nw1–nw4, each with their own Pi), the watcher itself is shared:
-running `install.sh` from any clone installs/refreshes it and adds that
-clone's directory to `/etc/usbip-net-regen/repos.txt`. Whenever
-`usbip-net-toolkit`'s `/var/lib/usbip-net-client/attached.csv` changes, it
-reruns `script` then `docker compose up -d` for every registered clone —
-compose only recreates a container whose config actually differs, so this
-only touches whatever pod's device mapping actually moved, in whichever
-clone it belongs to.
-
-```bash
-sudo bash cleanup.sh                            # unregister this clone only
-sudo bash cleanup.sh --wipe-pods                # + docker compose down every generated pod here
-sudo bash cleanup.sh --wipe-pods --wipe-data    # + delete VM storage/data too (destructive)
-sudo bash cleanup.sh --purge-shared             # + remove the shared bridge (refuses if other clones still registered)
-```
+Check it: `systemctl status docker-clients-reconcile.service`,
+`journalctl -u docker-clients-reconcile.service`, or run it on demand with
+`sudo systemctl start docker-clients-reconcile.service`.
 
 ## Rebuilding this box from scratch
 
-This repo is one piece of a larger lab; from a fresh Ubuntu install, the
-full sequence is:
-
 1. Install Docker.
-2. On each Raspberry Pi holding USB adapters:
-   `usbip-net-toolkit/host/install.sh`.
-3. On this machine: `usbip-net-toolkit/client/install.sh`, then list each
-   Pi in `/etc/usbip-net/servers.conf`.
-4. `soleng2018/hol`'s `setup.sh` (FRR/DHCP/RADIUS containers).
-5. `soleng2018/labs`'s `labs.sh` (Traefik/Authentik/Cloudflared).
-6. For each workshop (nw1, nw2, ...): clone this repo into a directory
-   named exactly for the workshop (the folder name is the workshop
-   identity), restore that workshop's real `parameters.txt` (kept outside
-   git — see above), then `bash up.sh`. Plug the dongles in first: a VM
-   whose MAC isn't found is skipped and reported, not started.
-   Start Traefik (step 5) before this, or set `REQUIRE_TRAEFIK = "true"`
-   so a missing Traefik is an error instead of silently-missing web routes.
-   Only if you still use USB/IP: `sudo bash install.sh` as well.
+2. Plug every USB dongle into this host directly.
+3. `soleng2018/hol`'s `setup.sh` (FRR/DHCP/RADIUS containers).
+4. `soleng2018/labs`'s `labs.sh` (Traefik/Authentik/Cloudflared).
+5. Clone this repo once, e.g. `git clone git@github.com:soleng2018/docker-clients.git /home/nova/docker-clients`.
+6. Restore your real `parameters.txt` into that clone (kept outside git --
+   see above), then `bash reconcile.sh`.
+7. `sudo bash install.sh` so a future reboot self-heals.
 
 Fresh installs: Windows VMs install unattended (a ~6 GB ISO download each);
 macOS VMs need their first-boot setup done by hand in the GUI.

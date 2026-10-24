@@ -1,17 +1,17 @@
 # This repo carries only the generator + its (secret-free) template.
-# Real deployment config (parameters.txt) and everything the generator
-# produces (per-VM docker-compose.yml, VM disk/storage directories) are
+# Real deployment config (parameters.txt), the generator's local state
+# (.managed-pods.txt, .trash/), and everything it produces outside this
+# clone (per-VM docker-compose.yml, VM disk/storage directories) are
 # runtime state, not source -- ignore everything by default and allow-list
 # the files that actually belong in git.
 *
 
 !.gitignore
 !README.md
-!script
+!reconcile.sh
 !mac_usb_mapping.sh
 !parameters.txt.example
 !install.sh
 !cleanup.sh
-!up.sh
-!bridge/
-!bridge/*
+!systemd/
+!systemd/*

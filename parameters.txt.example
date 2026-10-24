@@ -1,28 +1,33 @@
 # One line per VM. Format:
-#   container_name = "os","version","ram","cpu","username","password","web_port","remote_port","domain","mac1"[,"mac2"][,"host=<fqdn>"][,"ip=<address>"]
+#   <testbed>/<vm> = "os","version","ram","cpu","username","password","web_port","remote_port","url","mac1"[,"mac2"][,"ip=<address>"]
 #
+# testbed:     groups VMs into a folder created as a SIBLING of this clone
+#              (one directory up), e.g. testbed "nw3" -> ../nw3/win1/, ../nw3/win2/, ...
+#              This is the only thing that decides folder/container naming now --
+#              there's no separate "workshop name" setting.
+# vm:          the VM's own name within its testbed (win1, win2, mac1, ...).
+#              May itself contain "/" to sub-group (e.g. nw3/rack1/win1).
 # os:          "windows" or "macos"
 # version:     passed through as-is to the image (e.g. "11" for Windows, "14" for macOS Sonoma)
-# ram / cpu:   passed through as RAM_SIZE / CPU_CORES (e.g. "8G", "4")
-# username/password: only used when os=windows; pass "","" for macos (that image doesn't support them)
-# web_port:    host port mapped to the container's web viewer (8006)
-# remote_port: host port mapped to the container's remote-access port
+# ram / cpu:   e.g. "8G" / "4"
+# username / password: Windows RDP login. Leave both "" for macos (ignored for that os).
+# web_port:    host port for the browser-based console (noVNC), forwarded to container port 8006
+# remote_port: host port for RDP (windows) or VNC (macos)
 #              (container-side is fixed per os: 3389/RDP for windows, 5900/VNC for macos)
-# domain:      used to build this VM's Traefik hostname (<docker-name>.<domain>,
-#              see container_name note below)
-# mac1[,mac2]: MAC address(es) of the USB NIC(s) to pass through to this VM.
-#              Resolved by whatever's visible locally under /sys/class/net at
-#              generation time -- a wired dongle plugged directly into this
-#              host and a wireless dongle imported over USB/IP from a Pi
-#              (see usbip-net-toolkit) both work identically here; nothing
-#              in this script cares which one it is. Leave "" for a VM with no USB NIC.
-# host=<fqdn>: (optional) full Traefik hostname for this VM. Default: <docker-name>.<domain>.
+# url:         this VM's full Traefik hostname, e.g. "nw3-win1.example.com". Must be
+#              globally unique across every testbed in this file.
+# mac1[,mac2]: MAC address(es) of the USB NIC(s) to pass through to this VM. Resolved
+#              by whatever's visible locally under /sys/class/net at generation time.
+#              Leave both out for a VM with no USB NIC.
 # ip=<address>: (optional) static address on the Traefik network (must be inside
-#              TRAEFIK_SUBNET). Pin these so anything that points at a VM's IP
+#              TRAEFIK_SUBNET below). Pin this so anything that points at a VM's IP
 #              (e.g. Cloudflare Targets/routes) survives a rebuild or recreate.
-#              host= / ip= / the MACs may appear in any order after "domain".
 #
-# Optional global settings (UPPER_CASE keys; VM names stay lower-case). Defaults shown:
+# All host ports (web_port and remote_port, across every testbed) must be unique,
+# and so must every url. reconcile.sh validates both up front and refuses to
+# generate anything if it finds a typo, a duplicate port, or a duplicate url.
+#
+# Optional global settings (UPPER_CASE keys; VM/testbed names stay lower-case). Defaults shown:
 #   TRAEFIK_NETWORK = "traefik"         # docker network shared with Traefik / cloudflared
 #   TRAEFIK_SUBNET = ""                 # e.g. "172.18.0.0/16" -- pinned when the network is first created
 #   CERT_RESOLVER = "letsencrypt"
@@ -30,16 +35,12 @@
 #   ENTRYPOINT = "websecure"
 #   REQUIRE_TRAEFIK = "false"           # "true" = refuse to generate if Traefik isn't running
 #
-# Each workshop gets its own clone of this repo (e.g. /home/nova/nw1,
-# /home/nova/nw2, ...), so container_name here only needs to be unique
-# within THIS clone -- no workshop prefix needed. (container_name may still
-# contain "/" to group VMs within a single clone if you ever want that;
-# mkdir -p handles it and "/" becomes "-" in the actual Docker container
-# name/hostname, since those can't hold a literal "/".)
-#
-# All host ports (web_port and remote_port, across every line) must be unique.
+# Re-running reconcile.sh is the normal workflow -- it's what fixes a host reboot's
+# stale USB hostbus/hostaddr, and install.sh wires it up to also run once at boot.
+# Removing a line here tears down that VM and moves ../<testbed>/<vm> into .trash/
+# (not a permanent delete) the next time reconcile.sh runs.
 
 TRAEFIK_SUBNET = "172.18.0.0/16"
 
-win1 = "windows","11","8G","4","labuser","changeme","8101","3391","example.com","aa:bb:cc:dd:ee:01","ip=172.18.101.11"
-mac1 = "macos","14","8G","4","","","8102","3392","example.com","aa:bb:cc:dd:ee:02","ip=172.18.101.12"
+nw3/win1 = "windows","11","8G","4","labuser","changeme","8101","3391","nw3-win1.example.com","aa:bb:cc:dd:ee:01","ip=172.18.101.11"
+nw3/mac1 = "macos","14","8G","4","","","8102","3392","nw3-mac1.example.com","aa:bb:cc:dd:ee:02","ip=172.18.101.12"
