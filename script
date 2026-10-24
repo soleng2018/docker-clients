@@ -128,11 +128,59 @@ check_traefik_installed() {
     return 1
 }
 
+# Global settings. Defaults reproduce the previously hardcoded behaviour; any of
+# them can be overridden with an UPPER_CASE line in parameters.txt, e.g.
+#   CERT_RESOLVER = "letsencrypt"
+TRAEFIK_NETWORK="traefik"      # docker network shared with Traefik/cloudflared
+TRAEFIK_SUBNET=""              # e.g. 172.18.0.0/16 -- pinned when the network is created
+CERT_RESOLVER="letsencrypt"
+AUTH_MIDDLEWARE="authentik@file"
+ENTRYPOINT="websecure"
+REQUIRE_TRAEFIK="false"        # "true" = refuse to generate without Traefik (instead of silently omitting labels)
+
+# VM names are lower-case by convention; UPPER_CASE keys are global settings.
+# NOTE: deliberately a glob test, not a regex -- a regex match here would overwrite
+# BASH_REMATCH, which the callers still need for the rest of the line.
+is_global_key() { [[ "$1" == [[:upper:]]* && "$1" != *[![:upper:][:digit:]_]* ]]; }
+
+apply_global() {
+    local key=$1 value=$2
+    case "$key" in
+        TRAEFIK_NETWORK|TRAEFIK_SUBNET|CERT_RESOLVER|AUTH_MIDDLEWARE|ENTRYPOINT|REQUIRE_TRAEFIK)
+            printf -v "$key" '%s' "$value" ;;
+        *) echo "WARNING: unknown setting '$key' in parameters.txt (ignored)" >&2 ;;
+    esac
+}
+
+# get_option <key> <param>...  -> prints the value of a "key=value" option token, if present
+get_option() {
+    local key=$1 tok
+    shift
+    for tok in "$@"; do
+        tok=$(echo "$tok" | tr -d '"' | xargs)
+        if [[ "$tok" == "$key="* ]]; then
+            echo "${tok#"$key="}"
+            return
+        fi
+    done
+}
+
 # Function to ensure traefik network exists
 ensure_traefik_network() {
-    if ! docker network inspect traefik &> /dev/null; then
-        echo "Creating traefik network..."
-        docker network create traefik
+    if ! docker network inspect "$TRAEFIK_NETWORK" &> /dev/null; then
+        echo "Creating $TRAEFIK_NETWORK network..."
+        if [ -n "$TRAEFIK_SUBNET" ]; then
+            docker network create --subnet "$TRAEFIK_SUBNET" "$TRAEFIK_NETWORK"
+        else
+            docker network create "$TRAEFIK_NETWORK"
+        fi
+    elif [ -n "$TRAEFIK_SUBNET" ]; then
+        local actual
+        actual=$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' "$TRAEFIK_NETWORK" 2>/dev/null)
+        if [[ " $actual " != *" $TRAEFIK_SUBNET "* ]]; then
+            echo "WARNING: network '$TRAEFIK_NETWORK' already exists with subnet(s) [${actual% }], not the configured TRAEFIK_SUBNET $TRAEFIK_SUBNET." >&2
+            echo "         Static ip= addresses and any Cloudflare routes that assume $TRAEFIK_SUBNET may not match." >&2
+        fi
     fi
 }
 
@@ -151,6 +199,16 @@ generate_docker_compose() {
     local mac1=${11}
     local mac2=${12}
     local traefik_installed=${13}
+    local host_override=${14}
+    local static_ip=${15}
+
+    # Compose project names must be lower-case [a-z0-9_-]. Setting this
+    # explicitly (instead of letting compose derive it from the folder name,
+    # "win1" in every workshop) stops one workshop's `up -d` from replacing
+    # another workshop's same-named VM.
+    local project_name
+    project_name=$(echo "$container_name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_\n-' '-')
+    local fqdn="${host_override:-${container_name}.${domain}}"
 
     # dockurr/windows vs dockurr/macos: image name matches os_type directly.
     # Only these differ between the two images: USERNAME/PASSWORD support,
@@ -187,6 +245,7 @@ generate_docker_compose() {
     fi
     
     cat <<EOF
+name: ${project_name}
 services:
   ${os_type}:
     image: dockurr/${os_type}
@@ -253,17 +312,17 @@ EOF
     labels:
       - traefik.enable=true
       # Main web interface route (with Authentik)
-      - traefik.http.routers.${container_name}-web.rule=Host(\`${container_name}.${domain}\`) && !PathPrefix(\`/websockify\`)
-      - traefik.http.routers.${container_name}-web.entrypoints=websecure
+      - traefik.http.routers.${container_name}-web.rule=Host(\`${fqdn}\`) && !PathPrefix(\`/websockify\`)
+      - traefik.http.routers.${container_name}-web.entrypoints=${ENTRYPOINT}
       - traefik.http.routers.${container_name}-web.tls=true
-      - traefik.http.routers.${container_name}-web.tls.certresolver=letsencrypt
+      - traefik.http.routers.${container_name}-web.tls.certresolver=${CERT_RESOLVER}
       - traefik.http.routers.${container_name}-web.service=${container_name}-svc
-      - traefik.http.routers.${container_name}-web.middlewares=authentik@file
+      - traefik.http.routers.${container_name}-web.middlewares=${AUTH_MIDDLEWARE}
       # WebSocket route (without Authentik)
-      - traefik.http.routers.${container_name}-ws.rule=Host(\`${container_name}.${domain}\`) && PathPrefix(\`/websockify\`)
-      - traefik.http.routers.${container_name}-ws.entrypoints=websecure
+      - traefik.http.routers.${container_name}-ws.rule=Host(\`${fqdn}\`) && PathPrefix(\`/websockify\`)
+      - traefik.http.routers.${container_name}-ws.entrypoints=${ENTRYPOINT}
       - traefik.http.routers.${container_name}-ws.tls=true
-      - traefik.http.routers.${container_name}-ws.tls.certresolver=letsencrypt
+      - traefik.http.routers.${container_name}-ws.tls.certresolver=${CERT_RESOLVER}
       - traefik.http.routers.${container_name}-ws.service=${container_name}-svc
       - traefik.http.routers.${container_name}-ws.middlewares=${container_name}-ws-headers
       # Service definition
@@ -278,12 +337,22 @@ EOF
     
     # Only include traefik network if traefik is installed
     if [ "$traefik_installed" = "true" ]; then
-        cat <<EOF
+        if [ -n "$static_ip" ]; then
+            cat <<EOF
     networks:
-      - traefik
+      ${TRAEFIK_NETWORK}:
+        ipv4_address: ${static_ip}
+EOF
+        else
+            cat <<EOF
+    networks:
+      - ${TRAEFIK_NETWORK}
+EOF
+        fi
+        cat <<EOF
 
 networks:
-  traefik:
+  ${TRAEFIK_NETWORK}:
     external: true
 EOF
     fi
@@ -305,6 +374,17 @@ if [ ! -f "$PARAMETERS_FILE" ]; then
     exit 1
 fi
 
+# Load global settings (UPPER_CASE = "value" lines) before anything else uses them
+while IFS= read -r line || [ -n "$line" ]; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
+        key=$(echo "${BASH_REMATCH[1]}" | xargs)
+        if is_global_key "$key"; then
+            apply_global "$key" "$(echo "${BASH_REMATCH[2]}" | tr -d '"' | xargs)"
+        fi
+    fi
+done < "$PARAMETERS_FILE"
+
 # Check if traefik is installed
 TRAEFIK_INSTALLED="false"
 if check_traefik_installed; then
@@ -312,13 +392,18 @@ if check_traefik_installed; then
     echo "Traefik is installed. Including traefik labels and network."
     # Ensure traefik network exists
     ensure_traefik_network
+elif [ "$REQUIRE_TRAEFIK" = "true" ]; then
+    echo "ERROR: REQUIRE_TRAEFIK is true but no Traefik was found. Start Traefik first (labs.sh), then re-run." >&2
+    exit 1
 else
-    echo "Traefik is not installed. Skipping traefik labels and network."
+    echo "WARNING: Traefik is not installed. Skipping traefik labels and network -- the generated"
+    echo "         VMs will have NO web routes. Install Traefik and re-run to add them."
 fi
 
 # First pass: Validate port uniqueness
 declare -A used_ports
 declare -A container_ports
+declare -A used_ips
 validation_errors=0
 
 echo "Validating port uniqueness..."
@@ -330,11 +415,26 @@ while IFS= read -r line || [ -n "$line" ]; do
     # Parse line
     if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
         container_name=$(echo "${BASH_REMATCH[1]}" | xargs)
+        is_global_key "$container_name" && continue
         params=$(echo "${BASH_REMATCH[2]}" | xargs)
-        
+
         # Parse parameters (remove quotes and split by comma)
         IFS=',' read -ra PARAMS <<< "$params"
-        
+
+        # Static IPs (optional ip= option) must be valid and unique within this clone
+        vm_ip=$(get_option ip "${PARAMS[@]:9}")
+        if [ -n "$vm_ip" ]; then
+            if [[ ! "$vm_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+                echo "ERROR: Container '$container_name' has an invalid ip= value '$vm_ip'."
+                validation_errors=$((validation_errors + 1))
+            elif [[ -n "${used_ips[$vm_ip]}" ]]; then
+                echo "ERROR: IP $vm_ip is already used by container '${used_ips[$vm_ip]}'. Container '$container_name' cannot use the same IP."
+                validation_errors=$((validation_errors + 1))
+            else
+                used_ips[$vm_ip]="$container_name"
+            fi
+        fi
+
         # Extract port values (remove quotes)
         # These are HOST ports - container port for port1 is always 8006;
         # port2's container-side port depends on os (3389 RDP / 5900 VNC)
@@ -372,14 +472,18 @@ fi
 echo "Port validation passed. All ports are unique."
 echo ""
 
+generated=()
+skipped=()
+
 # Read parameters.txt line by line
 while IFS= read -r line || [ -n "$line" ]; do
     # Skip empty lines and comments
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
     
-    # Parse line: windows1 = "windows","11","4G","2","nile","nile1234","8006","3389","nilenetworks.com","5c:85:7e:39:1e:f3","1c:69:7a:ac:2d:0e"
+    # Parse line: win1 = "windows","11","4G","2","user","password","8006","3389","example.com","aa:bb:cc:dd:ee:01"[,"aa:bb:cc:dd:ee:02"][,"host=fqdn"][,"ip=172.18.x.y"]
     if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
         container_name=$(echo "${BASH_REMATCH[1]}" | xargs)
+        is_global_key "$container_name" && continue
         params=$(echo "${BASH_REMATCH[2]}" | xargs)
 
         # Parse parameters (remove quotes and split by comma)
@@ -395,11 +499,34 @@ while IFS= read -r line || [ -n "$line" ]; do
         port1=$(echo "${PARAMS[6]}" | tr -d '"' | xargs)
         port2=$(echo "${PARAMS[7]}" | tr -d '"' | xargs)
         domain=$(echo "${PARAMS[8]}" | tr -d '"' | xargs)
-        mac1=$(echo "${PARAMS[9]}" | tr -d '"' | xargs)
-        mac2=$(echo "${PARAMS[10]}" | tr -d '"' | xargs)
+
+        # Everything after the domain: MAC address(es) (up to two) and optional
+        # host=<fqdn> / ip=<address> options, in any order. Empty tokens are ignored.
+        mac1=""
+        mac2=""
+        for ((i = 9; i < ${#PARAMS[@]}; i++)); do
+            tok=$(echo "${PARAMS[$i]}" | tr -d '"' | xargs)
+            [ -z "$tok" ] && continue
+            if [[ "$tok" == ip=* || "$tok" == host=* ]]; then
+                continue
+            elif [[ "$tok" =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ ]]; then
+                if [ -z "$mac1" ]; then
+                    mac1="$tok"
+                elif [ -z "$mac2" ]; then
+                    mac2="$tok"
+                else
+                    echo "WARNING: '$container_name' lists more than two MACs; ignoring $tok" >&2
+                fi
+            else
+                echo "WARNING: ignoring unrecognized option '$tok' for '$container_name'" >&2
+            fi
+        done
+        host_override=$(get_option host "${PARAMS[@]:9}")
+        static_ip=$(get_option ip "${PARAMS[@]:9}")
 
         if [ "$os_type" != "windows" ] && [ "$os_type" != "macos" ]; then
             echo "ERROR: Container '$container_name' has unrecognized os '$os_type' (expected 'windows' or 'macos'). Skipping."
+            skipped+=("$container_name (unrecognized os '$os_type')")
             continue
         fi
         
@@ -430,6 +557,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         # If USB devices are required but not found, skip folder creation
         if [ "$usb_devices_found" = "false" ]; then
             echo "WARNING: Skipping container '$container_name' - USB device(s) not found for MAC address(es): $missing_macs"
+            skipped+=("$container_name (USB device not found: $missing_macs)")
             continue
         fi
         
@@ -444,12 +572,19 @@ while IFS= read -r line || [ -n "$line" ]; do
 
         # Generate docker-compose.yml
         generate_docker_compose "$docker_name" "$os_type" "$version" "$ram_size" "$cpu_cores" \
-            "$username" "$password" "$port1" "$port2" "$domain" "$mac1" "$mac2" "$TRAEFIK_INSTALLED" > \
+            "$username" "$password" "$port1" "$port2" "$domain" "$mac1" "$mac2" "$TRAEFIK_INSTALLED" \
+            "$host_override" "$static_ip" > \
             "$container_dir/docker-compose.yml"
-        
+
         echo "Generated docker-compose.yml for $container_name in $container_dir"
+        generated+=("$container_name")
     fi
 done < "$PARAMETERS_FILE"
 
-echo "Done! All docker-compose.yml files have been generated."
+echo ""
+echo "Done. Generated ${#generated[@]}, skipped ${#skipped[@]}."
+if [ ${#skipped[@]} -gt 0 ]; then
+    echo "Skipped (any existing docker-compose.yml for these was left as-is):"
+    for s in "${skipped[@]}"; do echo "  - $s"; done
+fi
 

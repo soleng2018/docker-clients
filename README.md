@@ -54,7 +54,7 @@ it the same way. A VM can list any number of MACs from any mix of sources.
 ## `parameters.txt`
 
 ```
-container_name = "os","version","ram","cpu","username","password","web_port","remote_port","domain","mac1"[,"mac2"...]
+container_name = "os","version","ram","cpu","username","password","web_port","remote_port","domain","mac1"[,"mac2"][,"host=<fqdn>"][,"ip=<address>"]
 ```
 
 See [parameters.txt.example](parameters.txt.example) for a worked example
@@ -85,12 +85,34 @@ of both `os` values. Notes:
   `<workshop-folder-name>-<container_name>`, with any `/` in
   `container_name` also replaced by `-` (both can't hold a literal `/`).
 
+- **Optional per-VM options**, after `domain`, in any order alongside the MACs:
+  `host=<fqdn>` sets the full Traefik hostname (default
+  `<docker-name>.<domain>`), and `ip=<address>` gives the VM a static
+  address on the Traefik network so anything that points at its IP
+  (Cloudflare Targets/routes, for example) survives a rebuild. Duplicate or
+  malformed `ip=` values are rejected up front, like port collisions.
+- **Optional global settings** — `UPPER_CASE = "value"` lines (VM names are
+  lower-case): `TRAEFIK_NETWORK` (default `traefik`), `TRAEFIK_SUBNET`
+  (pinned when the network is first created; warns if an existing network
+  differs), `CERT_RESOLVER`, `AUTH_MIDDLEWARE`, `ENTRYPOINT`, and
+  `REQUIRE_TRAEFIK = "true"` to refuse to generate (instead of silently
+  leaving the web routes out) when Traefik isn't running.
+- Every generated compose file starts with `name: <workshop>-<vm>`. Compose
+  would otherwise name the project after the folder (`win1`, in *every*
+  workshop), and one workshop's `docker compose up -d` would replace
+  another workshop's same-named VM.
+
 ## Usage
 
 ```bash
-bash script                 # (re)generate docker-compose.yml for every resolvable VM in this clone
-cd <vm-name> && docker compose up -d
+bash up.sh                  # generate + start every VM in this clone, then report which are really running
+bash up.sh --dry-run        # same, but start nothing
+bash script                 # just (re)generate the docker-compose.yml files
 ```
+
+`up.sh` exits non-zero and names any VM that isn't running — including ones
+skipped because their USB dongle wasn't found, which would otherwise be easy
+to miss.
 
 ## Keeping USB/IP-sourced devices in sync (`usbip-net-regen`)
 
@@ -134,6 +156,14 @@ full sequence is:
    Pi in `/etc/usbip-net/servers.conf`.
 4. `soleng2018/hol`'s `setup.sh` (FRR/DHCP/RADIUS containers).
 5. `soleng2018/labs`'s `labs.sh` (Traefik/Authentik/Cloudflared).
-6. For each workshop (nw1, nw2, ...): clone this repo into its own
-   directory, restore that workshop's real `parameters.txt` (kept outside
-   git — see above), then `bash script` and `sudo bash install.sh`.
+6. For each workshop (nw1, nw2, ...): clone this repo into a directory
+   named exactly for the workshop (the folder name is the workshop
+   identity), restore that workshop's real `parameters.txt` (kept outside
+   git — see above), then `bash up.sh`. Plug the dongles in first: a VM
+   whose MAC isn't found is skipped and reported, not started.
+   Start Traefik (step 5) before this, or set `REQUIRE_TRAEFIK = "true"`
+   so a missing Traefik is an error instead of silently-missing web routes.
+   Only if you still use USB/IP: `sudo bash install.sh` as well.
+
+Fresh installs: Windows VMs install unattended (a ~6 GB ISO download each);
+macOS VMs need their first-boot setup done by hand in the GUI.

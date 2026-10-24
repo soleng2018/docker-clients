@@ -12,5 +12,6 @@
 !parameters.txt.example
 !install.sh
 !cleanup.sh
+!up.sh
 !bridge/
 !bridge/*

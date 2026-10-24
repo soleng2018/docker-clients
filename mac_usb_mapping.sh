@@ -1,4 +1,5 @@
-MAC="00:0f:13:28:1f:03"
+# Usage: bash mac_usb_mapping.sh <mac-address>
+MAC="${1:?usage: $0 <mac-address>}"
 IFACE=$(ip -br link | grep -i "$MAC" | awk '{print $1}')
 
 # Get the parent directory of the device

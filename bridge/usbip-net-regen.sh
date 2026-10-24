@@ -71,10 +71,11 @@ while IFS= read -r repo_dir || [ -n "$repo_dir" ]; do
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
             container_name=$(echo "${BASH_REMATCH[1]}" | xargs)
+            [[ "$container_name" == [[:upper:]]* && "$container_name" != *[![:upper:][:digit:]_]* ]] && continue
             pod_dir="$repo_dir/$container_name"
             if [ -f "$pod_dir/docker-compose.yml" ]; then
                 echo "usbip-net-regen: reconciling $repo_dir/$container_name"
-                if ! (cd "$pod_dir" && docker compose up -d); then
+                if ! (cd "$pod_dir" && docker compose -p "$(basename "$repo_dir")-${container_name//\//-}" up -d); then
                     echo "usbip-net-regen: WARNING failed to reconcile $pod_dir" >&2
                 fi
             fi

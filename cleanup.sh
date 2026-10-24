@@ -58,10 +58,11 @@ if [ "$WIPE_PODS" = "true" ] && [ -f "$REPO_DIR/parameters.txt" ]; then
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         if [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
             container_name=$(echo "${BASH_REMATCH[1]}" | xargs)
+            [[ "$container_name" == [[:upper:]]* && "$container_name" != *[![:upper:][:digit:]_]* ]] && continue
             pod_dir="$REPO_DIR/$container_name"
             if [ -f "$pod_dir/docker-compose.yml" ]; then
                 echo "  - $container_name"
-                (cd "$pod_dir" && docker compose down) || true
+                (cd "$pod_dir" && docker compose -p "$(basename "$REPO_DIR")-${container_name//\//-}" down) || true
                 if [ "$WIPE_DATA" = "true" ]; then
                     rm -rf "$pod_dir"
                     echo "    (removed $pod_dir, including VM storage/data)"
